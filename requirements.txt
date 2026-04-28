@@ -1,0 +1,6 @@
+Pillow>=10.0
+ImageHash>=4.3
+openpyxl>=3.1
+# Optional but recommended: needed for mockup-vs-source matching
+opencv-python-headless>=4.8
+numpy>=1.24
