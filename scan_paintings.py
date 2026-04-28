@@ -289,80 +289,104 @@ def load_link_map(path: Path) -> dict[str, str]:
     return mapping
 
 
-def write_xlsx(records: list[ImageRecord], output: Path, link_map: dict[str, str]) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Paintings"
+SHEET_HEADERS = [
+    "link",
+    "name",
+    "short description",
+    "long description",
+    "technical description",
+]
+SHEET_COL_WIDTHS = [40, 28, 40, 60, 40]
 
-    headers = [
-        "Category",
-        "Painting name",
-        "Short description",
-        "Long description",
-        "Technical description",
-        "Picture link",
-        "Primary file",
-        "Dimensions (px)",
-        "File size (KB)",
-        "Mockup files",
-        "Mockup links",
-        "Notes",
-    ]
-    ws.append(headers)
 
+# Excel sheet name limits: <=31 chars, no [ ] : * ? / \
+_INVALID_SHEET_CHARS = re.compile(r"[\[\]:\*\?/\\]")
+
+
+def safe_sheet_name(name: str, taken: set[str]) -> str:
+    cleaned = _INVALID_SHEET_CHARS.sub(" ", name).strip() or "Category"
+    cleaned = cleaned[:31]
+    base = cleaned
+    i = 2
+    while cleaned.lower() in {t.lower() for t in taken}:
+        suffix = f" {i}"
+        cleaned = base[: 31 - len(suffix)] + suffix
+        i += 1
+    taken.add(cleaned)
+    return cleaned
+
+
+def _style_header_row(ws) -> None:
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor="2F5496")
-    for col_idx, _ in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col_idx)
+    for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+
+def _write_category_sheet(ws, records_for_cat: list[ImageRecord], link_map: dict[str, str]) -> int:
+    """Write one category's rows into ws. Returns the number of painting rows."""
+    ws.append(SHEET_HEADERS)
+    _style_header_row(ws)
+
     by_cluster: dict[int, list[ImageRecord]] = defaultdict(list)
-    for rec in records:
+    for rec in records_for_cat:
         by_cluster[rec.cluster_id].append(rec)
 
-    # Stable order: by category, then primary filename
-    rows_to_write = []
+    rows = []
     for group in by_cluster.values():
         primary = next((r for r in group if r.is_primary), group[0])
         mockups = [r for r in group if r is not primary]
-        rows_to_write.append((primary, mockups))
-    rows_to_write.sort(key=lambda x: (x[0].category.lower(), x[0].filename.lower()))
+        rows.append((primary, mockups))
+    rows.sort(key=lambda x: x[0].filename.lower())
 
-    for primary, mockups in rows_to_write:
+    for primary, _mockups in rows:
         primary_link = link_map.get(primary.filename.lower(), "")
-        mockup_names = "\n".join(m.filename for m in mockups)
-        mockup_links = "\n".join(
-            link_map.get(m.filename.lower(), "") for m in mockups
-        ).strip()
-
         ws.append([
-            primary.category,
-            "",                                    # Painting name (manual)
-            "",                                    # Short description (manual)
-            "",                                    # Long description (manual)
-            "",                                    # Technical description (manual)
-            primary_link,
-            primary.filename,
-            f"{primary.width}x{primary.height}",
-            round(primary.filesize / 1024, 1),
-            mockup_names,
-            mockup_links,
-            "",                                    # Notes
+            primary_link,                          # link (Drive URL or empty)
+            "",                                    # name (manual)
+            "",                                    # short description (manual)
+            "",                                    # long description (manual)
+            "",                                    # technical description (manual)
         ])
 
-    # Column widths + wrap on description columns
-    widths = [16, 28, 40, 60, 40, 40, 28, 14, 12, 28, 40, 24]
-    for i, w in enumerate(widths, start=1):
+    for i, w in enumerate(SHEET_COL_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     wrap = Alignment(wrap_text=True, vertical="top")
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = wrap
-
     ws.freeze_panes = "A2"
+    return len(rows)
+
+
+def write_xlsx(
+    by_category: dict[str, list[ImageRecord]],
+    output: Path,
+    link_map: dict[str, str],
+) -> tuple[int, int]:
+    """Write one worksheet per category. Returns (categories, total_rows)."""
+    wb = Workbook()
+    # We don't know the first category name yet, so reuse the default sheet
+    # for it instead of leaving an empty placeholder.
+    categories = sorted(by_category.keys(), key=str.lower)
+    if not categories:
+        wb.active.title = "Paintings"
+        wb.save(output)
+        return 0, 0
+
+    taken_sheet_names: set[str] = set()
+    total = 0
+    first_ws = wb.active
+    for i, category in enumerate(categories):
+        sheet_name = safe_sheet_name(category, taken_sheet_names)
+        ws = first_ws if i == 0 else wb.create_sheet()
+        ws.title = sheet_name
+        total += _write_category_sheet(ws, by_category[category], link_map)
+
     wb.save(output)
+    return len(categories), total
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -399,26 +423,33 @@ def main(argv: list[str] | None = None) -> int:
         print("No images found.", file=sys.stderr)
         return 1
 
-    print(f"Clustering by perceptual hash (threshold={args.phash_threshold}) ...")
-    cluster_by_phash(records, args.phash_threshold)
-    n_clusters = len({r.cluster_id for r in records})
-    print(f"  {n_clusters} clusters from pHash")
+    # Cluster within each category. A painting that lives in two folders
+    # is two records (different paths) and gets its own row in each
+    # category's sheet.
+    by_category: dict[str, list[ImageRecord]] = defaultdict(list)
+    for rec in records:
+        by_category[rec.category].append(rec)
 
-    if use_orb:
-        print(f"Merging mockup pairs via ORB features (min_matches={args.orb_min_matches}) ...")
-        merge_clusters_by_orb(records, args.orb_min_matches)
-        n_clusters = len({r.cluster_id for r in records})
-        print(f"  {n_clusters} clusters after ORB merge")
-
-    pick_primaries(records)
+    cluster_id_offset = 0
+    for category, recs in by_category.items():
+        cluster_by_phash(recs, args.phash_threshold)
+        if use_orb:
+            merge_clusters_by_orb(recs, args.orb_min_matches)
+        pick_primaries(recs)
+        # Make cluster IDs unique across categories so downstream grouping
+        # by cluster_id never collides between sheets.
+        local_max = max((r.cluster_id for r in recs), default=-1)
+        for r in recs:
+            r.cluster_id += cluster_id_offset
+        cluster_id_offset += local_max + 1
 
     link_map: dict[str, str] = {}
     if args.link_map:
         link_map = load_link_map(args.link_map)
         print(f"  loaded {len(link_map)} filename->URL mappings")
 
-    write_xlsx(records, args.output, link_map)
-    print(f"Wrote {args.output} ({n_clusters} painting rows)")
+    n_categories, total_rows = write_xlsx(by_category, args.output, link_map)
+    print(f"Wrote {args.output}: {n_categories} categories, {total_rows} painting rows")
     return 0
 
 
