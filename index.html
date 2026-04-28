@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Artzoneya - Drive folder to painting catalog</title>
+<style>
+  :root {
+    --bg: #faf7f2;
+    --ink: #1d1a16;
+    --muted: #6b655c;
+    --line: #d9d2c4;
+    --accent: #2f5496;
+    --accent-ink: #ffffff;
+    --warn: #b54708;
+    --ok: #2f7d3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  p.lede { color: var(--muted); margin: 0 0 28px; }
+  fieldset {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 0 0 18px;
+    background: #fff;
+  }
+  legend { padding: 0 6px; font-weight: 600; color: var(--muted); }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 8px 0 4px; }
+  input[type="text"], input[type="password"], select, textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  small { display: block; color: var(--muted); margin-top: 4px; font-size: 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+  button {
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    padding: 10px 18px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  button:disabled { opacity: 0.5; cursor: progress; }
+  button.secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  .actions { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  progress { width: 100%; height: 14px; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 6px; font-size: 13px; color: var(--muted); }
+  .stats b { color: var(--ink); }
+  #log {
+    height: 240px;
+    resize: vertical;
+    white-space: pre;
+    overflow: auto;
+  }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  details { margin-top: 6px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  code { background: #efeae0; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Artzoneya catalog builder</h1>
+  <p class="lede">Point at a Google Drive folder of paintings, get back an Excel file with one sheet per category, embedded thumbnails, and Gemini-drafted descriptions.</p>
+
+  <fieldset>
+    <legend>Inputs</legend>
+    <label for="apiKey">Google API key <small>Same key needs Drive API <em>and</em> Generative Language API enabled. Stored only in this tab.</small></label>
+    <input id="apiKey" type="password" autocomplete="off" placeholder="AIza..." />
+
+    <label for="folderUrl">Drive folder URL or ID <small>Folder must be shared "Anyone with the link - Viewer". Subfolders become sheet tabs.</small></label>
+    <input id="folderUrl" type="text" placeholder="https://drive.google.com/drive/folders/..." />
+
+    <div class="row">
+      <div>
+        <label for="model">Gemini model</label>
+        <select id="model">
+          <option value="gemini-2.5-flash" selected>gemini-2.5-flash (fast, recommended)</option>
+          <option value="gemini-2.5-pro">gemini-2.5-pro (slower, higher quality)</option>
+          <option value="gemini-2.0-flash">gemini-2.0-flash (legacy)</option>
+        </select>
+      </div>
+      <div>
+        <label for="concurrency">Parallel image calls</label>
+        <select id="concurrency">
+          <option>2</option>
+          <option selected>4</option>
+          <option>8</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label><input type="checkbox" id="skipMockups" checked /> Drop images Gemini classifies as mockups</label>
+        <small>Framed-on-wall, room scenes, lifestyle shots.</small>
+      </div>
+      <div>
+        <label><input type="checkbox" id="embedImages" checked /> Embed thumbnails into the .xlsx</label>
+        <small>Off = link-only, much smaller file.</small>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="runBtn" type="button">Build catalog</button>
+      <button id="cancelBtn" type="button" class="secondary" disabled>Cancel</button>
+      <button id="downloadBtn" type="button" class="secondary" disabled>Download .xlsx</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Progress</legend>
+    <progress id="bar" max="100" value="0"></progress>
+    <div class="stats">
+      <span>Found: <b id="foundN">0</b></span>
+      <span>Analyzed: <b id="doneN">0</b></span>
+      <span>Mockups dropped: <b id="mockupN">0</b></span>
+      <span>Failed: <b id="failN">0</b></span>
+    </div>
+    <details open>
+      <summary>Log</summary>
+      <textarea id="log" readonly></textarea>
+    </details>
+  </fieldset>
+
+  <fieldset>
+    <legend>How it works</legend>
+    <p style="margin:6px 0;color:var(--muted);font-size:13px">
+      1. The Drive REST API lists every image in the folder tree using your key.<br>
+      2. Each image is downsampled to 1024px max and sent to Gemini, which returns a name, color palette, likely materials, size guess, story, and a mockup flag.<br>
+      3. ExcelJS assembles one sheet per top-level subfolder. Mockups are skipped by default.<br>
+      Nothing leaves your browser except the Drive and Gemini API calls.
+    </p>
+    <details>
+      <summary>One-time setup (Google API key + folder sharing)</summary>
+      <ol style="margin:8px 0 4px 18px;padding:0;color:var(--muted);font-size:13px;line-height:1.55">
+        <li>Open <code>console.cloud.google.com</code> and create (or pick) a project.</li>
+        <li>APIs &amp; Services &rarr; Library: enable <b>Google Drive API</b> and <b>Generative Language API</b>.</li>
+        <li>APIs &amp; Services &rarr; Credentials &rarr; Create credentials &rarr; <b>API key</b>. Copy it.</li>
+        <li>(Optional but recommended) Restrict the key: <em>API restrictions</em> &rarr; the two APIs above; <em>Application restrictions</em> &rarr; HTTP referrers &rarr; add <code>file://*</code> if opening this HTML locally.</li>
+        <li>Right-click the Drive folder &rarr; Share &rarr; <b>Anyone with the link &mdash; Viewer</b>. Subfolders inherit.</li>
+        <li>Paste the folder URL and the key above. Click <em>Build catalog</em>.</li>
+      </ol>
+    </details>
+  </fieldset>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  apiKey: $("apiKey"), folderUrl: $("folderUrl"), model: $("model"),
+  concurrency: $("concurrency"), skipMockups: $("skipMockups"), embedImages: $("embedImages"),
+  runBtn: $("runBtn"), cancelBtn: $("cancelBtn"), downloadBtn: $("downloadBtn"),
+  bar: $("bar"), foundN: $("foundN"), doneN: $("doneN"), mockupN: $("mockupN"), failN: $("failN"),
+  log: $("log"),
+};
+
+let cancelRequested = false;
+let lastBlob = null;
+let lastFilename = "paintings.xlsx";
+
+const COLUMNS = [
+  { key: "picture",    header: "picture",         width: 22 },
+  { key: "link",       header: "link",            width: 38 },
+  { key: "name",       header: "name",            width: 28 },
+  { key: "color",      header: "color",           width: 32 },
+  { key: "materials",  header: "materials",       width: 26 },
+  { key: "size",       header: "height & width",  width: 18 },
+  { key: "story",      header: "story",           width: 60 },
+];
+
+const RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    is_mockup:           { type: "BOOLEAN" },
+    name:                { type: "STRING" },
+    dominant_colors:     { type: "STRING" },
+    likely_materials:    { type: "STRING" },
+    estimated_dimensions:{ type: "STRING" },
+    short_story:         { type: "STRING" },
+  },
+  required: ["is_mockup", "name", "dominant_colors", "likely_materials", "estimated_dimensions", "short_story"],
+};
+
+const PROMPT = [
+  "You are cataloging a fine-art gallery's collection. Look at this painting image.",
+  "1. is_mockup: true if this is a marketing mockup (framed on a wall, styled-room scene, lifestyle shot) rather than a flat photograph of the painting itself; otherwise false.",
+  "2. name: a short evocative title (3-6 words). Title-case.",
+  "3. dominant_colors: brief description of the main palette (e.g., 'warm ochre and burnt sienna with cream highlights'). One sentence.",
+  "4. likely_materials: best guess at medium and surface (e.g., 'oil on canvas', 'mixed media on linen'). Short phrase.",
+  "5. estimated_dimensions: format as '<width> x <height> cm' if confidently estimable from aspect ratio and visual cues, otherwise the literal word 'unknown'.",
+  "6. short_story: 1-2 sentence evocative gallery caption. No clichés.",
+  "Return only the JSON.",
+].join("\n");
+
+// ---------- logging / UI helpers ----------
+function log(msg, cls) {
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] ${msg}\n`;
+  els.log.value += line;
+  els.log.scrollTop = els.log.scrollHeight;
+  if (cls === "warn") console.warn(msg);
+  else if (cls === "ok") console.log("%c" + msg, "color:#2f7d3a");
+  else console.log(msg);
+}
+function setBusy(busy) {
+  els.runBtn.disabled = busy;
+  els.cancelBtn.disabled = !busy;
+  els.apiKey.disabled = busy;
+  els.folderUrl.disabled = busy;
+  els.model.disabled = busy;
+  els.concurrency.disabled = busy;
+}
+function resetCounters() {
+  els.foundN.textContent = "0";
+  els.doneN.textContent = "0";
+  els.mockupN.textContent = "0";
+  els.failN.textContent = "0";
+  els.bar.value = 0;
+  els.log.value = "";
+}
+
+// ---------- Drive folder URL parsing ----------
+function extractFolderId(input) {
+  const s = (input || "").trim();
+  if (!s) return null;
+  const m = s.match(/\/folders\/([a-zA-Z0-9_-]+)/) ||
+            s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9_-]{10,}$/.test(s)) return s;
+  return null;
+}
+
+// ---------- Drive API ----------
+const DRIVE_FILES = "https://www.googleapis.com/drive/v3/files";
+
+async function driveList(parentId, key) {
+  const out = [];
+  let pageToken = "";
+  do {
+    const params = new URLSearchParams({
+      q: `'${parentId}' in parents and trashed = false`,
+      fields: "nextPageToken, files(id, name, mimeType, webViewLink, imageMediaMetadata(width,height))",
+      pageSize: "1000",
+      supportsAllDrives: "true",
+      includeItemsFromAllDrives: "true",
+      key,
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const r = await fetch(`${DRIVE_FILES}?${params}`);
+    if (!r.ok) {
+      const body = await r.text();
+      throw new Error(`Drive list failed (${r.status}): ${body.slice(0, 240)}`);
+    }
+    const j = await r.json();
+    for (const f of (j.files || [])) out.push(f);
+    pageToken = j.nextPageToken || "";
+  } while (pageToken);
+  return out;
+}
+
+async function driveDownload(fileId, key) {
+  const url = `${DRIVE_FILES}/${fileId}?alt=media&key=${encodeURIComponent(key)}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Drive download ${fileId} failed (${r.status})`);
+  return await r.blob();
+}
+
+/**
+ * Walk the folder tree. Returns a flat list of {file, category} where
+ * category is the immediate top-level subfolder name (or "(root)" for
+ * images sitting directly in the input folder).
+ */
+async function walkFolder(rootId, key, onFound) {
+  const results = [];
+  const rootChildren = await driveList(rootId, key);
+  // Loose images at the root
+  for (const f of rootChildren) {
+    if (f.mimeType && f.mimeType.startsWith("image/")) {
+      results.push({ file: f, category: "(root)" });
+      onFound(results.length);
+    }
+  }
+  // Each subfolder = one category, recursively
+  const subfolders = rootChildren.filter(f => f.mimeType === "application/vnd.google-apps.folder");
+  for (const sub of subfolders) {
+    if (cancelRequested) break;
+    const stack = [sub.id];
+    while (stack.length) {
+      if (cancelRequested) break;
+      const cur = stack.pop();
+      const children = await driveList(cur, key);
+      for (const c of children) {
+        if (c.mimeType === "application/vnd.google-apps.folder") {
+          stack.push(c.id);
+        } else if (c.mimeType && c.mimeType.startsWith("image/")) {
+          results.push({ file: c, category: sub.name });
+          onFound(results.length);
+        }
+      }
+    }
+  }
+  return results;
+}
+
+// ---------- image preprocessing ----------
+async function blobToImageBitmap(blob) {
+  if (typeof createImageBitmap === "function") {
+    try { return await createImageBitmap(blob); }
+    catch (_) { /* fall through */ }
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function resizeBlob(blob, maxDim, mime = "image/jpeg", quality = 0.85) {
+  const bmp = await blobToImageBitmap(blob);
+  const w = bmp.width, h = bmp.height;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const tw = Math.max(1, Math.round(w * scale));
+  const th = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = tw; canvas.height = th;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bmp, 0, 0, tw, th);
+  if (bmp.close) bmp.close();
+  return await new Promise((res) => canvas.toBlob(res, mime, quality));
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = r.result;
+      const comma = s.indexOf(",");
+      resolve(comma >= 0 ? s.slice(comma + 1) : s);
+    };
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+// ---------- Gemini ----------
+async function callGemini(blob, key, model) {
+  const resized = await resizeBlob(blob, 1024, "image/jpeg", 0.85);
+  const b64 = await blobToBase64(resized);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const body = {
+    contents: [{
+      role: "user",
+      parts: [
+        { inline_data: { mime_type: "image/jpeg", data: b64 } },
+        { text: PROMPT },
+      ],
+    }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
+      temperature: 0.4,
+    },
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`Gemini ${r.status}: ${t.slice(0, 240)}`);
+  }
+  const j = await r.json();
+  const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+  if (!text) throw new Error("Gemini returned empty response");
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (e) { throw new Error("Gemini returned non-JSON: " + text.slice(0, 200)); }
+  return parsed;
+}
+
+// ---------- concurrency-limited map ----------
+async function pmap(items, limit, fn) {
+  const ret = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      if (cancelRequested) return;
+      const i = next++;
+      if (i >= items.length) return;
+      try { ret[i] = await fn(items[i], i); }
+      catch (e) { ret[i] = { __error: e }; }
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+  return ret;
+}
+
+// ---------- xlsx ----------
+function safeSheetName(name, taken) {
+  let cleaned = (name || "Category").replace(/[\[\]:\*\?\/\\]/g, " ").trim().slice(0, 31) || "Category";
+  const lower = new Set([...taken].map(s => s.toLowerCase()));
+  if (!lower.has(cleaned.toLowerCase())) { taken.add(cleaned); return cleaned; }
+  let i = 2;
+  while (true) {
+    const suffix = ` ${i}`;
+    const candidate = cleaned.slice(0, 31 - suffix.length) + suffix;
+    if (!lower.has(candidate.toLowerCase())) { taken.add(candidate); return candidate; }
+    i++;
+  }
+}
+
+async function buildWorkbook(byCategory, embedImages) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Artzoneya catalog builder";
+  wb.created = new Date();
+
+  const taken = new Set();
+  const categories = [...byCategory.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+  for (const cat of categories) {
+    const rows = byCategory.get(cat);
+    if (!rows.length) continue;
+    const ws = wb.addWorksheet(safeSheetName(cat, taken), {
+      views: [{ state: "frozen", ySplit: 1 }],
+    });
+    ws.columns = COLUMNS.map(c => ({ header: c.header, key: c.key, width: c.width }));
+    ws.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2F5496" } };
+    ws.getRow(1).alignment = { horizontal: "center", vertical: "middle" };
+
+    let r = 2;
+    for (const row of rows) {
+      const excelRow = ws.getRow(r);
+      excelRow.height = embedImages ? 110 : 22;
+      excelRow.values = {
+        picture: "",
+        link: { text: row.file.name, hyperlink: row.file.webViewLink || "" },
+        name: row.gemini.name || "",
+        color: row.gemini.dominant_colors || "",
+        materials: row.gemini.likely_materials || "",
+        size: row.gemini.estimated_dimensions || "",
+        story: row.gemini.short_story || "",
+      };
+      excelRow.alignment = { wrapText: true, vertical: "top" };
+      if (embedImages && row.thumbBase64) {
+        const imgId = wb.addImage({
+          base64: row.thumbBase64,
+          extension: "jpeg",
+        });
+        ws.addImage(imgId, {
+          tl: { col: 0.05, row: r - 1 + 0.05 },
+          ext: { width: 140, height: 140 },
+        });
+      }
+      r++;
+    }
+  }
+  const buf = await wb.xlsx.writeBuffer();
+  return new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+
+// ---------- main ----------
+async function run() {
+  resetCounters();
+  cancelRequested = false;
+  els.downloadBtn.disabled = true;
+  lastBlob = null;
+
+  const apiKey = els.apiKey.value.trim();
+  const folderId = extractFolderId(els.folderUrl.value);
+  const model = els.model.value;
+  const concurrency = parseInt(els.concurrency.value, 10) || 4;
+  const skipMockups = els.skipMockups.checked;
+  const embedImages = els.embedImages.checked;
+
+  if (!apiKey) { log("Missing API key.", "warn"); return; }
+  if (!folderId) { log("Could not parse folder ID from URL.", "warn"); return; }
+
+  setBusy(true);
+  try {
+    log(`Listing Drive folder ${folderId} ...`);
+    const items = await walkFolder(folderId, apiKey, (n) => { els.foundN.textContent = String(n); });
+    log(`Found ${items.length} images across ${new Set(items.map(i => i.category)).size} categor${items.length === 1 ? "y" : "ies"}.`);
+    if (!items.length) { log("Nothing to do.", "warn"); return; }
+
+    let done = 0, failed = 0, mockups = 0;
+    const results = await pmap(items, concurrency, async (item) => {
+      if (cancelRequested) return null;
+      try {
+        const blob = await driveDownload(item.file.id, apiKey);
+        const gemini = await callGemini(blob, apiKey, model);
+        let thumbBase64 = null;
+        if (embedImages) {
+          const thumb = await resizeBlob(blob, 240, "image/jpeg", 0.8);
+          thumbBase64 = await blobToBase64(thumb);
+        }
+        if (skipMockups && gemini.is_mockup) {
+          mockups++;
+          els.mockupN.textContent = String(mockups);
+          log(`  · mockup skipped: ${item.file.name}`);
+          return { ...item, gemini, thumbBase64, isMockup: true };
+        }
+        return { ...item, gemini, thumbBase64, isMockup: false };
+      } catch (e) {
+        failed++;
+        els.failN.textContent = String(failed);
+        log(`  ! ${item.file.name}: ${e.message}`, "warn");
+        return { ...item, error: e.message };
+      } finally {
+        done++;
+        els.doneN.textContent = String(done);
+        els.bar.value = (done / items.length) * 100;
+      }
+    });
+
+    if (cancelRequested) { log("Cancelled.", "warn"); return; }
+
+    const keep = results.filter(r => r && !r.error && !r.isMockup);
+    log(`Writing xlsx: ${keep.length} painting rows, ${mockups} mockups dropped, ${failed} failed.`);
+
+    const byCategory = new Map();
+    for (const r of keep) {
+      if (!byCategory.has(r.category)) byCategory.set(r.category, []);
+      byCategory.get(r.category).push(r);
+    }
+    for (const arr of byCategory.values()) {
+      arr.sort((a, b) => a.file.name.localeCompare(b.file.name, undefined, { sensitivity: "base" }));
+    }
+
+    lastBlob = await buildWorkbook(byCategory, embedImages);
+    lastFilename = `paintings-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    els.downloadBtn.disabled = false;
+    log(`Done. Click "Download .xlsx" (${(lastBlob.size / 1024 / 1024).toFixed(2)} MB).`, "ok");
+  } catch (e) {
+    log(`FATAL: ${e.message}`, "warn");
+    console.error(e);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function downloadXlsx() {
+  if (!lastBlob) return;
+  const url = URL.createObjectURL(lastBlob);
+  const a = document.createElement("a");
+  a.href = url; a.download = lastFilename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+els.runBtn.addEventListener("click", () => { run().catch(e => log("FATAL: " + e.message, "warn")); });
+els.cancelBtn.addEventListener("click", () => { cancelRequested = true; log("Cancel requested..."); });
+els.downloadBtn.addEventListener("click", downloadXlsx);
+</script>
+</body>
+</html>
